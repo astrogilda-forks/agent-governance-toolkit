@@ -12,7 +12,6 @@ detect insertion or deletion of tool calls without replaying the full session lo
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import threading
@@ -20,6 +19,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
+
+from mcp_receipt_governed.jcs import canonicalize
 
 _logger = logging.getLogger(__name__)
 
@@ -70,8 +71,7 @@ class GovernanceReceipt:
             data["parent_receipt_hash"] = self.parent_receipt_hash
         if self.session_id is not None:
             data["session_id"] = self.session_id
-        # ensure_ascii=False: RFC 8785 §3.2.2.2 requires raw UTF-8, not \uXXXX escapes
-        return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return canonicalize(data)
 
     def canonical_authorization_payload(self) -> str:
         """Return the external-authorizer payload that binds this exact receipt."""
@@ -89,7 +89,7 @@ class GovernanceReceipt:
             "receipt_payload_hash": self.payload_hash(),
             "type": "https://agent-governance.org/receipts/external-authorization/v1",
         }
-        return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return canonicalize(data)
 
     def payload_hash(self) -> str:
         return hashlib.sha256(self.canonical_payload().encode()).hexdigest()
@@ -150,8 +150,13 @@ class GovernanceReceipt:
 
 
 def hash_tool_args(tool_args: Optional[Dict[str, Any]]) -> str:
-    """SHA-256 of tool arguments as canonical JSON. ``None`` or empty → hash of ``{}``."""
-    canonical = json.dumps(tool_args, sort_keys=True, separators=(",", ":")) if tool_args else "{}"
+    """SHA-256 of tool arguments as RFC 8785 canonical JSON. ``None`` or empty → hash of ``{}``.
+
+    Raises ``ValueError`` or ``TypeError`` for arguments RFC 8785 cannot
+    represent, so the adapter fails closed rather than sign a hash no other
+    implementation can reproduce.
+    """
+    canonical = canonicalize(tool_args) if tool_args else "{}"
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
