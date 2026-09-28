@@ -168,6 +168,8 @@ These signals analyze the user's repositories for suspicious creation patterns.
 "awesome" lists to pad their profile with seemingly relevant repos. A burst of
 3+ awesome-list forks in 72 hours is a strong signal because legitimate
 developers rarely fork multiple curated lists in rapid succession.
+Forks from which the user has opened a pull request to the parent repository
+are contributions, not padding, so they are left out of both fork-burst counts.
 
 **Feature overlap explained:** AGT defines six feature buckets that together
 characterize its unique capability set:
