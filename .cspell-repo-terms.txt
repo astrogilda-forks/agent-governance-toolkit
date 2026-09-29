@@ -1301,3 +1301,6 @@ xmrn
 
 # International Traffic in Arms Regulations
 ITAR
+
+# agent-evidence-vectors observed-effect module name (agent-mesh retry-effect tests)
+observedeffect
