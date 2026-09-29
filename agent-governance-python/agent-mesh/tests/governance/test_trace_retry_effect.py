@@ -1,32 +1,19 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""A retried tool call: what the Trust Record says, and what only effect evidence can.
-
-The case: a tool completes a write, its response is lost, and the agent retries.
-AGT's audit trail records what the agent attempted, so the TRACE Trust Record for
-that session carries two tool invocations and one error. It cannot say how many
-writes landed, or whether the timed-out attempt failed. Those are questions about
-the external effect, and they are answered by a record from an observer below the
-agent.
-
-The effect records come from the ``agent-evidence-vectors`` observed-effect corpus,
-five members built for exactly this case, and are judged by that package's
-reference reader. The tests pin two things:
-
-* one AGT session maps to one Trust Record whichever way the effect went, so the
-  Trust Record alone must not be read as the effect count;
-* the effect evidence separates the three outcomes (one write, a duplicate write,
-  not yet witnessed) and refuses the two records that would hide them.
-"""
+"""Test AGT retry traces against the observed-effect corpus."""
 
 from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
-from importlib import resources
+import sys
+from datetime import UTC, datetime, timedelta
+from importlib import import_module, resources
+from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from agentmesh.governance.audit import AuditEntry
 from agentmesh.governance.trace_model import (
@@ -35,13 +22,9 @@ from agentmesh.governance.trace_model import (
     session_to_trust_record,
 )
 
-observedeffect = pytest.importorskip(
-    "agent_evidence_vectors.observedeffect",
-    reason="agent-evidence-vectors needs Python 3.13 or later",
-)
-
 _ZEROS = "0" * 64
 _TARGET = "/srv/app/orders/ord-0017.json"
+_CORPUS_PACKAGE = "agent_evidence_vectors"
 
 _CONFIG = TraceModelConfig(
     model={
@@ -61,45 +44,53 @@ _CONFIG = TraceModelConfig(
 )
 
 
-def _corpus_dir():
-    return (
-        resources.files("agent_evidence_vectors")
-        / "corpora"
-        / "vectors-observed-effect"
-    )
+def _corpus_dir() -> Any:
+    """Return the installed observed-effect fixture directory."""
+    return resources.files(_CORPUS_PACKAGE) / "corpora" / "vectors-observed-effect"
 
 
-def _manifest() -> dict:
+def _manifest() -> dict[str, Any]:
+    """Read the corpus manifest for fixture paths and its public test key."""
     return json.loads((_corpus_dir() / "MANIFEST.json").read_text(encoding="utf-8"))
 
 
-def _member(slug: str) -> tuple[dict, bytes]:
+def _member(slug: str) -> bytes:
+    """Return the signed fixture selected by its stable corpus slug."""
     for entry in _manifest()["vectors"]:
         if entry["slug"] == slug:
-            return entry, (_corpus_dir() / entry["file"]).read_bytes()
+            return (_corpus_dir() / entry["file"]).read_bytes()
     raise AssertionError(f"observed-effect corpus has no member {slug!r}")
 
 
-def _judge(slug: str):
+def _judge(slug: str) -> Any:
+    """Verify a fixture with the corpus's public test key."""
+    if sys.version_info < (3, 13):
+        pytest.skip("agent-evidence-vectors requires Python 3.13 or later")
+    observedeffect = import_module("agent_evidence_vectors.observedeffect")
     manifest = _manifest()
     policy = observedeffect.Policy(
         predicate_type=manifest["predicateType"],
         observer_public_key=manifest["keys"]["observer"]["publicKey"],
     )
-    _, raw = _member(slug)
-    return observedeffect.verify(raw, policy)
+    return observedeffect.verify(_member(slug), policy)
 
 
-def _writes(slug: str) -> list[dict]:
-    _, raw = _member(slug)
-    payload = base64.b64decode(json.loads(raw)["payload"])
-    return json.loads(payload)["predicate"]["writes"]
+def _predicate(slug: str) -> dict[str, Any]:
+    """Decode a fixture's predicate after signature verification."""
+    payload = base64.b64decode(json.loads(_member(slug))["payload"])
+    return json.loads(payload)["predicate"]
 
 
-def _retried_session() -> TraceSession:
-    """Two attempts at one operation; the first response was lost."""
+def _reported_attempts(predicate: dict[str, Any]) -> int:
+    """Read the agent's reported attempt count."""
+    values = [value for value in predicate["dualValues"] if value["fact"] == "tool.attempts"]
+    assert len(values) == 1
+    return int(values[0]["reportedValue"])
+
+
+def _retried_session(attempts: int = 2) -> TraceSession:
+    """Build a write trace with timeouts before the final response."""
     t0 = datetime(2026, 9, 19, 0, 0, 1, tzinfo=UTC)
-    t1 = datetime(2026, 9, 19, 0, 0, 3, tzinfo=UTC)
     common = {
         "event_type": "tool_invocation",
         "agent_did": "did:mesh:orders-agent",
@@ -111,88 +102,97 @@ def _retried_session() -> TraceSession:
         audit_entries=[
             AuditEntry(
                 **common,
-                entry_id="audit_op0017_attempt1",
-                timestamp=t0,
-                outcome="error",
-                data={"operation_id": "op-0017", "attempt": 1, "error": "timeout"},
-            ),
-            AuditEntry(
-                **common,
-                entry_id="audit_op0017_attempt2",
-                timestamp=t1,
-                outcome="success",
-                data={"operation_id": "op-0017", "attempt": 2},
-            ),
+                entry_id=f"audit_op0017_attempt{attempt}",
+                timestamp=t0 + timedelta(seconds=2 * (attempt - 1)),
+                outcome="success" if attempt == attempts else "error",
+                data={
+                    "operation_id": "op-0017",
+                    "attempt": attempt,
+                    **({"error": "timeout"} if attempt < attempts else {}),
+                },
+            )
+            for attempt in range(1, attempts + 1)
         ],
         data_class="internal",
     )
 
 
-def test_trust_record_counts_attempts_not_effects():
-    record = session_to_trust_record(_retried_session(), _CONFIG)
+class TestRetryEffect:
+    """Check AGT's attempt count without inferring an effect count."""
 
-    # Two attempts, and nothing in the record says how many writes landed.
-    assert record["tool_transcript"]["call_count"] == 2
-    assert record["appraisal"]["status"] == "affirming"
+    __test__ = False
 
-    # The same session is consistent with one write and with two: the record is a
-    # function of the session, and the session is identical in both worlds.
-    assert session_to_trust_record(_retried_session(), _CONFIG) == record
-    assert len(_writes("retry-one-write-across-two-attempts")) == 1
-    assert len(_writes("retry-duplicated-the-write")) == 2
-
-
-def test_one_write_across_two_attempts_is_established():
-    report = _judge("retry-one-write-across-two-attempts")
-    assert report.verdict == "valid"
-    assert report.effects_independently_observed
-    # Authoritative: nothing else landed in scope, so the operation completed once
-    # and the timed-out attempt was not a failed operation.
-    assert report.absence_established
-    assert [w["path"] for w in _writes("retry-one-write-across-two-attempts")] == [
-        _TARGET
-    ]
+    @staticmethod
+    def assert_attempt_record() -> dict[str, Any]:
+        """Check AGT's mapper and return its bounded attempt claim."""
+        record = session_to_trust_record(_retried_session(), _CONFIG)
+        assert record["tool_transcript"]["call_count"] == 2
+        assert set(record["tool_transcript"]) == {"call_count", "hash"}
+        assert record["appraisal"]["status"] == "affirming"
+        return record
 
 
-def test_duplicate_write_is_visible_and_cannot_be_folded_into_one():
-    report = _judge("retry-duplicated-the-write")
-    assert report.verdict == "valid"
-    assert report.absence_established
-    assert [w["path"] for w in _writes("retry-duplicated-the-write")] == [
-        _TARGET,
-        _TARGET,
-    ]
+class TestPassingCases(TestRetryEffect):
+    """Check AGT's bounded attempt record."""
 
-    folded = _judge("retry-duplicate-reported-as-one")
-    assert folded.verdict == "malformed"
-    assert folded.codes == ["dual-value-not-recomputable"]
+    __test__ = True
+
+    def test_agt_attempt_count_on_all_supported_python_versions(self) -> None:
+        """Exercise AGT even when the optional corpus cannot be installed."""
+        self.assert_attempt_record()
+
+    @settings(max_examples=20)
+    @given(st.integers(min_value=1, max_value=8))
+    def test_timeout_retries_remain_attempts(self, attempts: int) -> None:
+        """Count calls across bounded retry lengths without inventing effects."""
+        record = session_to_trust_record(_retried_session(attempts), _CONFIG)
+        assert record["tool_transcript"]["call_count"] == attempts
+        assert record["appraisal"]["status"] == "affirming"
+        assert set(record["tool_transcript"]) == {"call_count", "hash"}
+
+    @pytest.mark.parametrize(
+        ("slug", "write_count", "absence_established"),
+        [
+            ("retry-one-write-across-two-attempts", 1, True),
+            ("retry-duplicated-the-write", 2, True),
+            ("retry-effect-not-yet-witnessed", 0, False),
+        ],
+    )
+    def test_observed_outcome_does_not_change_agt_attempt_claim(
+        self,
+        slug: str,
+        write_count: int,
+        absence_established: bool,
+    ) -> None:
+        """Compare each external outcome with the same AGT-visible retry."""
+        report = _judge(slug)
+        record = self.assert_attempt_record()
+        predicate = _predicate(slug)
+        assert report.verdict == "valid"
+        assert _reported_attempts(predicate) == record["tool_transcript"]["call_count"]
+        assert report.effects_independently_observed
+        assert report.absence_established is absence_established
+        assert [write["path"] for write in predicate["writes"]] == [_TARGET] * write_count
 
 
-def test_outcome_is_unknown_until_the_witness_arrives():
-    pending = _judge("retry-effect-not-yet-witnessed")
-    assert pending.verdict == "valid"
-    # The observer was blind where the write would land: no write is shown, and
-    # no absence is established either. Unknown, not failed.
-    assert not pending.absence_established
-    assert _writes("retry-effect-not-yet-witnessed") == []
+class TestFailingCases(TestRetryEffect):
+    """Check corpus refusals for overstated effects."""
 
-    promoted = _judge("retry-timeout-read-as-no-write")
-    assert promoted.verdict == "invalid"
-    assert promoted.codes == ["authoritative-coverage-incomplete"]
+    __test__ = True
 
-
-@pytest.mark.parametrize(
-    "slug",
-    [
-        "retry-one-write-across-two-attempts",
-        "retry-duplicated-the-write",
-        "retry-duplicate-reported-as-one",
-        "retry-effect-not-yet-witnessed",
-        "retry-timeout-read-as-no-write",
-    ],
-)
-def test_reader_matches_the_published_expectation(slug):
-    entry, _ = _member(slug)
-    report = _judge(slug)
-    assert report.verdict == entry["expected"]["verdict"]
-    assert report.codes == entry["expected"]["codes"]
+    @pytest.mark.parametrize(
+        ("slug", "verdict", "code"),
+        [
+            ("retry-duplicate-reported-as-one", "malformed", "dual-value-not-recomputable"),
+            ("retry-timeout-read-as-no-write", "invalid", "authoritative-coverage-incomplete"),
+        ],
+    )
+    def test_overclaimed_effect_is_not_licensed_by_agt(
+        self, slug: str, verdict: str, code: str
+    ) -> None:
+        """Keep AGT's affirmative attempt appraisal separate from effect truth."""
+        report = _judge(slug)
+        record = self.assert_attempt_record()
+        assert report.verdict == verdict
+        assert report.codes == [code]
+        assert _reported_attempts(_predicate(slug)) == record["tool_transcript"]["call_count"]
