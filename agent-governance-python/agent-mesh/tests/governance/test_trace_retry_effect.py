@@ -1,6 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""Test AGT retry traces against the observed-effect corpus."""
+"""Test AGT retry traces against the observed-effect corpus.
+
+The corpus uses a public test key. A valid result means corpus conformance,
+not that an observed effect is trustworthy in a deployment.
+"""
 
 from __future__ import annotations
 
@@ -187,7 +191,7 @@ class TestFailingCases(TestRetryEffect):
             ("retry-timeout-read-as-no-write", "invalid", "authoritative-coverage-incomplete"),
         ],
     )
-    def test_overclaimed_effect_is_not_licensed_by_agt(
+    def test_unsupported_effect_claim_is_not_licensed_by_agt(
         self, slug: str, verdict: str, code: str
     ) -> None:
         """Keep AGT's affirmative attempt appraisal separate from effect truth."""
