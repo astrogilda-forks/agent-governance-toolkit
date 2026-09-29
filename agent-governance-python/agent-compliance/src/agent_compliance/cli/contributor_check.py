@@ -181,15 +181,13 @@ def _search_issues(query: str, per_page: int = 30) -> list[dict]:
 # The user repos endpoint returns at most 100 repos per page. Reading only the
 # first page caps every repo-based count at 100 and hides older forks from the
 # fork-burst checks, so page through the listing (newest first) until a page is
-# short, a page reaches past the lookback window, or the page cap is hit.
-_REPO_LOOKBACK_DAYS = 90
+# short or the page cap is hit. Older repos also affect the theme denominator.
 _REPO_PAGE_SIZE = 100
 _REPO_MAX_PAGES = 10
 
 
 def _list_user_repos(username: str) -> list[dict]:
-    """List the user's repos, newest first, across as many pages as needed."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_REPO_LOOKBACK_DAYS)
+    """List up to 1,000 user repos, newest first, for repo-based signals."""
     repos: list[dict] = []
     for page in range(1, _REPO_MAX_PAGES + 1):
         data = _api(f"/users/{username}/repos", {
@@ -202,9 +200,6 @@ def _list_user_repos(username: str) -> list[dict]:
             break
         repos.extend(data)
         if len(data) < _REPO_PAGE_SIZE:
-            break
-        oldest = data[-1].get("created_at")
-        if oldest and datetime.fromisoformat(oldest.replace("Z", "+00:00")) < cutoff:
             break
     return repos
 
@@ -401,48 +396,20 @@ def check_repo_themes(username: str, repos: list[dict] | None = None) -> list[Si
 
 
 _fork_pr_cache: dict[str, bool] = {}
-_pr_target_cache: dict[str, set[str]] = {}
-
-
-def _pr_target_repos(username: str) -> set[str]:
-    """Return the lower-cased full names of repos the user has opened PRs in."""
-    key = username.lower()
-    if key not in _pr_target_cache:
-        targets: set[str] = set()
-        try:
-            for item in _search_issues(f"author:{username} is:pr", per_page=100):
-                repo_url = item.get("repository_url", "")
-                if repo_url:
-                    targets.add(repo_url.replace("https://api.github.com/repos/", "").lower())
-        except Exception:
-            pass
-        _pr_target_cache[key] = targets
-    return _pr_target_cache[key]
 
 
 def _fork_has_outgoing_pr(username: str, fork_name: str) -> bool:
-    """Check if a fork has at least one PR (open, merged, or closed) to its parent.
-
-    A PR from a fork to its parent is stored on the parent, so
-    ``/repos/{username}/{fork_name}/pulls`` (PRs whose base is the fork) is
-    empty for an ordinary contribution. Resolve the fork's parent (and its
-    root source, for a fork of a fork) and check whether the user has
-    authored a PR there.
-    """
+    """Check if a fork has at least one PR (open, merged, or closed) to its parent."""
     cache_key = f"{username}/{fork_name}"
     if cache_key in _fork_pr_cache:
         return _fork_pr_cache[cache_key]
 
     result = False
     try:
-        targets = _pr_target_repos(username)
-        if targets:
-            fork = _api(f"/repos/{username}/{fork_name}") or {}
-            upstreams = {
-                (fork.get(key) or {}).get("full_name", "").lower()
-                for key in ("parent", "source")
-            }
-            result = bool((upstreams - {""}) & targets)
+        prs = _api(f"/repos/{username}/{fork_name}/pulls", {
+            "state": "all", "per_page": "1",
+        })
+        result = bool(prs)
     except Exception:
         pass
     _fork_pr_cache[cache_key] = result
