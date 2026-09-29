@@ -14,8 +14,6 @@ import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-import pytest
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import contributor_check
@@ -32,7 +30,6 @@ from contributor_check import (
     _check_fork_burst,
     _check_batch_naming,
     _check_self_promotion,
-    _fork_has_outgoing_pr,
     _apply_allowlist,
     _is_allowlisted,
     _load_allowlist,
@@ -285,7 +282,7 @@ class TestForkBurst:
             {"name": f"awesome-list-{i}", "fork": True, "description": "curated list", "created_at": (now - timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")}
             for i in range(5)
         ]
-        signals = _check_fork_burst(repos, username="testuser")
+        signals = _check_fork_burst(repos, username="sample-user")
         names = [s.name for s in signals]
         assert "awesome_fork_burst" not in names
 
@@ -298,7 +295,7 @@ class TestForkBurst:
             for i in range(4)
         ]
         # 4 forks, 1 has PR -> 3 remain, which hits >= 3 threshold
-        signals = _check_fork_burst(repos, username="testuser")
+        signals = _check_fork_burst(repos, username="sample-user")
         names = [s.name for s in signals]
         assert "awesome_fork_burst" in names
 
@@ -897,91 +894,11 @@ class TestSearchIssuesPagination:
 
 
 # ---------------------------------------------------------------------------
-# Fork-to-parent PR detection, repo pagination, and the spray window
+# Repo pagination and the spray window
 # ---------------------------------------------------------------------------
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-@pytest.fixture
-def _clear_pr_caches():
-    contributor_check._fork_pr_cache.clear()
-    contributor_check._pr_target_cache.clear()
-    yield
-    contributor_check._fork_pr_cache.clear()
-    contributor_check._pr_target_cache.clear()
-
-
-def _fork_api(parents: dict[str, str]):
-    """Fake _api: fork metadata names its parent; a fork's own /pulls is empty,
-    as it is on GitHub for a PR opened from the fork to its parent."""
-    def fake_api(path, params=None):
-        if path.endswith("/pulls"):
-            return []
-        for fork, parent in parents.items():
-            if path == f"/repos/testuser/{fork}":
-                return {"name": fork, "fork": True, "parent": {"full_name": parent}}
-        return None
-    return fake_api
-
-
-def _pr_items(*repos: str) -> list[dict]:
-    return [{"repository_url": f"https://api.github.com/repos/{r}"} for r in repos]
-
-
-@pytest.mark.usefixtures("_clear_pr_caches")
-class TestForkOutgoingPr:
-    @patch("contributor_check._search_issues")
-    @patch("contributor_check._api")
-    def test_pr_opened_on_parent_counts(self, mock_api, mock_search):
-        mock_api.side_effect = _fork_api({"awesome-x": "SomeOrg/awesome-x"})
-        mock_search.return_value = _pr_items("someorg/awesome-x")
-        assert _fork_has_outgoing_pr("testuser", "awesome-x") is True
-
-    @patch("contributor_check._search_issues")
-    @patch("contributor_check._api")
-    def test_renamed_fork_resolves_parent(self, mock_api, mock_search):
-        mock_api.side_effect = _fork_api({"awesome-x-1": "someorg/awesome-x"})
-        mock_search.return_value = _pr_items("someorg/awesome-x")
-        assert _fork_has_outgoing_pr("testuser", "awesome-x-1") is True
-
-    @patch("contributor_check._search_issues")
-    @patch("contributor_check._api")
-    def test_pr_elsewhere_does_not_count(self, mock_api, mock_search):
-        mock_api.side_effect = _fork_api({"awesome-x": "someorg/awesome-x"})
-        mock_search.return_value = _pr_items("otherorg/unrelated")
-        assert _fork_has_outgoing_pr("testuser", "awesome-x") is False
-
-    @patch("contributor_check._search_issues", return_value=[])
-    @patch("contributor_check._api")
-    def test_no_prs_skips_fork_lookup(self, mock_api, mock_search):
-        mock_api.side_effect = _fork_api({"awesome-x": "someorg/awesome-x"})
-        assert _fork_has_outgoing_pr("testuser", "awesome-x") is False
-        mock_api.assert_not_called()
-
-    @patch("contributor_check._search_issues")
-    @patch("contributor_check._api", return_value=None)
-    def test_missing_fork_metadata_is_not_a_pr(self, mock_api, mock_search):
-        mock_search.return_value = _pr_items("someorg/awesome-x")
-        assert _fork_has_outgoing_pr("testuser", "awesome-x") is False
-
-    @patch("contributor_check._search_issues")
-    @patch("contributor_check._api")
-    def test_awesome_forks_with_parent_prs_do_not_burst(self, mock_api, mock_search):
-        now = datetime.now(timezone.utc)
-        names = [f"awesome-list-{i}" for i in range(5)]
-        mock_api.side_effect = _fork_api({n: f"org{i}/{n}" for i, n in enumerate(names)})
-        mock_search.return_value = _pr_items(*(f"org{i}/{n}" for i, n in enumerate(names)))
-        repos = [
-            {"name": n, "fork": True, "description": "curated list",
-             "created_at": _iso(now - timedelta(minutes=i))}
-            for i, n in enumerate(names)
-        ]
-        signals = _check_fork_burst(repos, username="testuser")
-        assert [s.name for s in signals] == []
-        # One search for the user's PRs, not one per fork.
-        assert mock_search.call_count == 1
 
 
 class TestRepoListingPagination:
@@ -1007,16 +924,21 @@ class TestRepoListingPagination:
         assert burst and burst[0].value == 130
 
     @patch("contributor_check._api")
-    def test_stops_paging_past_lookback_window(self, mock_api):
-        now = datetime.now(timezone.utc)
-        page1 = [
-            {"name": f"repo-{i}", "created_at": _iso(now - timedelta(days=i))}
-            for i in range(100)
+    def test_old_repos_on_later_pages_affect_theme_denominator(self, mock_api):
+        old = _iso(datetime.now(timezone.utc) - timedelta(days=120))
+        repos = [
+            {"name": f"governance-{i}" if i < 60 else f"repo-{i}",
+             "fork": False, "description": "", "created_at": old}
+            for i in range(200)
         ]
-        mock_api.side_effect = lambda path, params=None: page1 if params["page"] == "1" else [{"name": "x"}]
-        repos = contributor_check._list_user_repos("busy")
-        assert len(repos) == 100
-        assert mock_api.call_count == 1
+        mock_api.side_effect = lambda path, params: repos[
+            (int(params["page"]) - 1) * 100:int(params["page"]) * 100
+        ]
+
+        signals = contributor_check.check_repo_themes("busy")
+
+        assert all(s.name != "governance_theme_concentration" for s in signals)
+        assert mock_api.call_count == 3
 
     @patch("contributor_check._api", return_value=None)
     def test_missing_user_returns_empty(self, mock_api):
@@ -1037,11 +959,15 @@ class TestSprayWindow:
     def test_five_repos_over_thirteen_days_is_not_spray(self):
         # Every issue is within 7 days of the middle one, but no 7-day span
         # holds more than three of them.
-        signals = check_spray_pattern("u", issues=self._issues([0, 3, 6, 10, 13]), user_repos=[])
+        signals = check_spray_pattern(
+            "u", issues=self._issues([0, 3, 6, 10, 13]), user_repos=[]
+        )
         assert all(s.name != "cross_repo_spray" for s in signals)
 
     def test_five_repos_within_seven_days_is_spray(self):
-        signals = check_spray_pattern("u", issues=self._issues([0, 1.5, 3, 5, 7]), user_repos=[])
+        signals = check_spray_pattern(
+            "u", issues=self._issues([0, 1.5, 3, 5, 7]), user_repos=[]
+        )
         spray = [s for s in signals if s.name == "cross_repo_spray"]
         assert spray and spray[0].value == 5
 
