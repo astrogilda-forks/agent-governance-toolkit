@@ -14,7 +14,7 @@ from agent_compliance.cli.contributor_check import (
 
 def _make_user(**kwargs) -> dict:
     defaults = {
-        "login": "testuser",
+        "login": "sample-user",
         "created_at": (
             datetime.now(timezone.utc) - timedelta(days=365)
         ).isoformat(),
@@ -154,67 +154,11 @@ class TestSearchIssuesPagination:
 
 
 # ---------------------------------------------------------------------------
-# Fork-to-parent PR detection, repo pagination, and the spray window
+# Repo pagination and the spray window
 # ---------------------------------------------------------------------------
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _clear_pr_caches():
-    contributor_check._fork_pr_cache.clear()
-    contributor_check._pr_target_cache.clear()
-
-
-def _fork_api(parents: dict[str, str]):
-    """Fake _api: fork metadata names its parent; a fork's own /pulls is empty,
-    as it is on GitHub for a PR opened from the fork to its parent."""
-    def fake_api(path, params=None):
-        if path.endswith("/pulls"):
-            return []
-        for fork, parent in parents.items():
-            if path == f"/repos/testuser/{fork}":
-                return {"name": fork, "fork": True, "parent": {"full_name": parent}}
-        return None
-    return fake_api
-
-
-def _pr_items(*repos: str) -> list[dict]:
-    return [{"repository_url": f"https://api.github.com/repos/{r}"} for r in repos]
-
-
-class TestForkOutgoingPr:
-    def setup_method(self):
-        _clear_pr_caches()
-
-    def teardown_method(self):
-        _clear_pr_caches()
-
-    def test_pr_opened_on_parent_counts(self):
-        with patch.object(contributor_check, "_api", side_effect=_fork_api({"awesome-x": "SomeOrg/awesome-x"})), \
-             patch.object(contributor_check, "_search_issues", return_value=_pr_items("someorg/awesome-x")):
-            assert contributor_check._fork_has_outgoing_pr("testuser", "awesome-x") is True
-
-    def test_pr_elsewhere_does_not_count(self):
-        with patch.object(contributor_check, "_api", side_effect=_fork_api({"awesome-x": "someorg/awesome-x"})), \
-             patch.object(contributor_check, "_search_issues", return_value=_pr_items("otherorg/unrelated")):
-            assert contributor_check._fork_has_outgoing_pr("testuser", "awesome-x") is False
-
-    def test_awesome_forks_with_parent_prs_do_not_burst(self):
-        now = datetime.now(timezone.utc)
-        names = [f"awesome-list-{i}" for i in range(5)]
-        repos = [
-            {"name": n, "fork": True, "description": "curated list",
-             "created_at": _iso(now - timedelta(minutes=i))}
-            for i, n in enumerate(names)
-        ]
-        parents = {n: f"org{i}/{n}" for i, n in enumerate(names)}
-        with patch.object(contributor_check, "_api", side_effect=_fork_api(parents)), \
-             patch.object(contributor_check, "_search_issues",
-                          return_value=_pr_items(*parents.values())) as mock_search:
-            signals = contributor_check._check_fork_burst(repos, username="testuser")
-        assert [s.name for s in signals] == []
-        assert mock_search.call_count == 1
 
 
 class TestRepoListingPagination:
@@ -238,20 +182,23 @@ class TestRepoListingPagination:
         burst = [s for s in signals if s.name == "recent_repo_burst"]
         assert burst and burst[0].value == 130
 
-    def test_stops_paging_past_lookback_window(self):
-        now = datetime.now(timezone.utc)
-        page1 = [
-            {"name": f"repo-{i}", "created_at": _iso(now - timedelta(days=i))}
-            for i in range(100)
+    def test_old_repos_on_later_pages_affect_theme_denominator(self):
+        old = _iso(datetime.now(timezone.utc) - timedelta(days=120))
+        repos = [
+            {"name": f"governance-{i}" if i < 60 else f"repo-{i}",
+             "fork": False, "description": "", "created_at": old}
+            for i in range(200)
         ]
 
         def fake_api(path, params=None):
-            return page1 if params["page"] == "1" else [{"name": "x"}]
+            return repos[(int(params["page"]) - 1) * 100:int(params["page"]) * 100]
 
         with patch.object(contributor_check, "_api", side_effect=fake_api) as mock_api:
-            repos = contributor_check._list_user_repos("busy")
-        assert len(repos) == 100
-        assert mock_api.call_count == 1
+            signals = contributor_check.check_repo_themes("busy")
+
+        assert all(s.name != "governance_theme_concentration" for s in signals)
+        assert mock_api.call_count == 3
+
 
 
 class TestSprayWindow:
