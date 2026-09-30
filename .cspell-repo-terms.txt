@@ -1294,14 +1294,19 @@ pastey
 schemars
 
 # --- Healthcare identifier terms used in HIPAA pattern matching and tests ---
+HPID
 hpid
+Luhn
 luhn
 NPPES
 xmrn
 
 # International Traffic in Arms Regulations
 ITAR
+bssn
+uncued
+undelimited
 
-# agent-evidence-vectors names used in the agent-mesh retry-effect tests
+# agent-mesh retry-effect tests
 observedeffect
 recomputable
