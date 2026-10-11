@@ -1306,13 +1306,10 @@ ITAR
 bssn
 uncued
 undelimited
-<<<<<<< HEAD
+verus
+vstd
+prettyplease
 
 # agent-mesh retry-effect tests
 observedeffect
 recomputable
-=======
-verus
-vstd
-prettyplease
->>>>>>> upstream/main
