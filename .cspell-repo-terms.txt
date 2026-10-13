@@ -1134,6 +1134,7 @@ utcnow
 uvicorn
 venv
 venvs
+vite
 vitest
 vnet
 waitforreleasecompletion
@@ -1309,7 +1310,12 @@ undelimited
 verus
 vstd
 prettyplease
-
-# agent-mesh retry-effect tests
+# --- OpenCode secret pattern terms (PR #4280) ---
+ATATT
+amqp
+amqps
+rediss
+xoxe
+# --- agent-mesh retry-effect tests ---
 observedeffect
 recomputable

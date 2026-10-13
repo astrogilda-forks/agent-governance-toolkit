@@ -173,8 +173,6 @@ REGISTERED_PACKAGES = {
     "pyatr",
     # agentrust-trace: TRACE v0.2 Trust Record library (real PyPI package; runtime dep for TRACE emission)
     "agentrust-trace", "agentrust_trace",
-    # agent-evidence-vectors: observed-effect record reader and corpus (real PyPI package; agent-mesh dev dep)
-    "agent-evidence-vectors", "agent_evidence_vectors",
     # flowise-agentmesh: AGT governance nodes for Flowise (first-party package in this repo)
     "flowise-agentmesh", "flowise_agentmesh",
     # OS-native (Landlock / Seatbelt) capability sandbox (real PyPI package, Alpha; agt-sandbox[nono])
@@ -220,7 +218,7 @@ REGISTERED_NPM_PACKAGES = {
     "@modelcontextprotocol/sdk", "ws", "commander", "chalk",
     "@anthropic-ai/sdk", "@types/node", "@types/ws", "@types/express",
     # Common npm dev dependencies
-    "eslint", "@typescript-eslint/parser", "@typescript-eslint/eslint-plugin",
+    "eslint", "vite", "@typescript-eslint/parser", "@typescript-eslint/eslint-plugin",
     "@typescript/typescript6", "@swc/core", "@swc/jest",
     "ts-jest", "@types/jest", "jest", "rimraf", "prettier",
     "axios", "@types/vscode", "@vscode/vsce", "webpack", "webpack-cli",
