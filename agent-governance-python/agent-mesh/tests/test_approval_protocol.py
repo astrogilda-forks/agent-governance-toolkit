@@ -125,6 +125,7 @@ RFC8785_APPENDIX_B = [
     ("0000000000000001", "5e-324"),
     ("8000000000000001", "-5e-324"),
     ("7fefffffffffffff", "1.7976931348623157e+308"),
+    # cspell:disable-next-line
     ("ffefffffffffffff", "-1.7976931348623157e+308"),
     ("4340000000000000", "9007199254740992"),
     ("c340000000000000", "-9007199254740992"),
@@ -161,7 +162,8 @@ class TestJcsNumberSerialization:
         assert canonicalize(value) == expected
 
     def test_number_inside_object(self):
-        assert canonicalize({"tolerance": 1e-6, "big": 1e21}) == b'{"big":1e+21,"tolerance":0.000001}'
+        canonical = canonicalize({"tolerance": 1e-6, "big": 1e21})
+        assert canonical == b'{"big":1e+21,"tolerance":0.000001}'
 
     @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
     def test_rejects_infinity(self, value: float):
